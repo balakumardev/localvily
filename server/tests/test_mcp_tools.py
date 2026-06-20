@@ -46,3 +46,64 @@ async def test_cloak_driver_rejected(monkeypatch):
     body = json.loads(out)
     assert body["status"] == "error"
     assert "cloak" in body["error"]
+
+
+async def test_request_never_raises_on_transport_error(monkeypatch):
+    # _request must always return a dict, even when the underlying client raises
+    # something other than ConnectError/ReadTimeout. AUTO_MANAGE_SERVER is off here,
+    # so no respawn is attempted.
+    monkeypatch.setattr(mcpserver, "AUTO_MANAGE_SERVER", False)
+
+    class _BoomClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            raise httpx.ConnectTimeout("boom")
+
+    monkeypatch.setattr(mcpserver, "_client", lambda: _BoomClient())
+    result = await mcpserver._request("GET", "/health")
+    assert result["status"] == "error"
+    # ConnectTimeout subclasses httpx.TimeoutException, so it maps to the timeout
+    # message. The point: the old ConnectError/ReadTimeout-only handler would have
+    # let this escape; now it always returns an error dict instead of raising.
+    assert "Timed out" in result["error"]
+
+
+async def test_request_connect_error_maps_to_cannot_connect(monkeypatch):
+    monkeypatch.setattr(mcpserver, "AUTO_MANAGE_SERVER", False)
+
+    class _ConnClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(mcpserver, "_client", lambda: _ConnClient())
+    result = await mcpserver._request("GET", "/health")
+    assert result["status"] == "error"
+    assert "Cannot connect" in result["error"]
+
+
+async def test_request_handles_non_json_200(monkeypatch):
+    class _HtmlClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            return httpx.Response(200, text="<html>not json</html>")
+
+    monkeypatch.setattr(mcpserver, "_client", lambda: _HtmlClient())
+    result = await mcpserver._request("GET", "/health")
+    assert result["status"] == "error"
+    assert "non-JSON" in result["error"]

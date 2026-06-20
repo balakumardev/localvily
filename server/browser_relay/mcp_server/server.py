@@ -302,7 +302,10 @@ async def _request(method: str, path: str, **kwargs) -> dict:
     try:
         async with _client() as client:
             resp = await client.request(method, path, **kwargs)
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        return {"status": "error", "error": "Timed out waiting for the browser relay"}
+    except httpx.TransportError:
+        # Connection-level failure (ConnectError, ConnectTimeout, PoolTimeout, etc.).
         if AUTO_MANAGE_SERVER and MANAGED_BACKEND_PORT is not None:
             try:
                 _ensure_local_backend(SERVER_URL, MANAGED_BACKEND_PORT)
@@ -312,11 +315,14 @@ async def _request(method: str, path: str, **kwargs) -> dict:
                 return {"status": "error", "error": f"Cannot connect to relay at {SERVER_URL}"}
         else:
             return {"status": "error", "error": f"Cannot connect to relay at {SERVER_URL}"}
-    except httpx.ReadTimeout:
-        return {"status": "error", "error": "Timed out waiting for the browser relay"}
+    except Exception as exc:  # final backstop — the tool must always return a dict
+        return {"status": "error", "error": f"Unexpected relay error: {exc}"}
 
     if resp.status_code == 200:
-        return resp.json()
+        try:
+            return resp.json()
+        except Exception:
+            return {"status": "error", "error": "Relay returned a non-JSON response"}
     try:
         detail = resp.json().get("detail", resp.text)
     except Exception:
@@ -367,8 +373,11 @@ def main():
     MANAGED_BACKEND_PORT = _manageable_local_port(SERVER_URL)
     AUTO_MANAGE_SERVER = not args.no_server and MANAGED_BACKEND_PORT is not None
     if AUTO_MANAGE_SERVER:
-        _ensure_backend_current(SERVER_URL, MANAGED_BACKEND_PORT)
-        _ensure_local_backend(SERVER_URL, MANAGED_BACKEND_PORT)
+        try:
+            _ensure_backend_current(SERVER_URL, MANAGED_BACKEND_PORT)
+            _ensure_local_backend(SERVER_URL, MANAGED_BACKEND_PORT)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
 
     if args.sse:
         mcp.run(transport="sse")
