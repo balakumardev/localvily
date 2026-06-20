@@ -351,6 +351,33 @@ async def fetch(url: str, include_html: bool = False, driver: str = "relay") -> 
 
 
 @mcp.tool()
+async def search_and_fetch(query: str, k: int = 5, engine: str = "bing", driver: str = "relay") -> str:
+    """Search, then fetch the full readable text of the top-k results in parallel.
+
+    Returns {status, results:[{title,url,snippet,text,length,fetch_error}]}. A page that
+    fails to fetch sets its own fetch_error and text=""; the batch still returns.
+    """
+    s = await _request("GET", "/search", params={"q": query, "k": k, "engine": engine, "driver": driver})
+    if s.get("status") != "ok":
+        return json.dumps(s, indent=2)
+
+    results = s.get("results", [])[:k]
+
+    async def _fetch_one(item: dict) -> dict:
+        f = await _request("GET", "/fetch", params={"url": item["url"], "driver": driver})
+        if f.get("status") == "ok":
+            return {**item, "text": f.get("text", ""), "length": f.get("length", 0), "fetch_error": None}
+        return {**item, "text": "", "length": 0, "fetch_error": f.get("error", "fetch failed")}
+
+    merged = await asyncio.gather(*[_fetch_one(r) for r in results])
+    return json.dumps(
+        {"status": "ok", "query": query, "engine": engine, "driver": driver,
+         "count": len(merged), "results": list(merged)},
+        indent=2,
+    )
+
+
+@mcp.tool()
 async def health() -> str:
     """Check relay + browser-extension connectivity and queue depth."""
     return json.dumps(await _request("GET", "/health"), indent=2)
