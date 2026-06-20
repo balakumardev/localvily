@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from httpx import ASGITransport
 
@@ -24,12 +26,6 @@ async def test_health_reports_ok_and_disconnected_before_any_poll():
     body = resp.json()
     assert body["status"] == "ok"
     assert body["extension_connected"] is False
-
-
-import asyncio
-
-import browser_relay.app as appmod
-from tests.conftest import drive_extension  # noqa: F401  (import style parity)
 
 
 async def test_health_reports_queue_depths_and_caps(client):
