@@ -7,6 +7,11 @@ def test_chunk_splits_by_size():
     assert "".join(out) == "a" * 2500
 
 
+def test_chunk_empty_and_none_yield_single_empty_chunk():
+    assert chunk("") == [""]
+    assert chunk(None) == [""]
+
+
 def test_to_storm_maps_shape_and_skips_empty_text():
     result = {
         "status": "ok",
