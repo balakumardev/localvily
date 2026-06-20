@@ -99,9 +99,25 @@ async def version():
     return {"version": __version__}
 
 
+DEFAULT_ENGINE = os.environ.get("BROWSER_RELAY_DEFAULT_ENGINE", "bing")
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "extension_connected": _extension_connected()}
+    poll_age = None if last_poll_time == 0 else round(time.monotonic() - last_poll_time, 1)
+    connected = _extension_connected()
+    return {
+        "status": "ok",
+        "extension_connected": connected,
+        "extension_status": "connected" if connected else ("stale" if last_poll_time else "never_seen"),
+        "last_poll_age_seconds": poll_age,
+        "search_queued": len(search_queue),
+        "fetch_queued": len(fetch_queue),
+        "in_flight": search_in_flight + fetch_in_flight,
+        "max_fetch_tabs": FETCH_CAP,
+        "engine": DEFAULT_ENGINE,
+        "version": __version__,
+    }
 
 
 @app.get("/search")
