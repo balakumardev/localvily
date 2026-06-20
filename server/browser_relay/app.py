@@ -12,6 +12,16 @@ EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # seconds
 QUERY_TIMEOUT = 110.0
 FETCH_TIMEOUT = 60.0
 
+import os
+
+FETCH_CAP = int(os.environ.get("BROWSER_RELAY_FETCH_CAP", "5"))
+SEARCH_CONCURRENCY = int(os.environ.get("BROWSER_RELAY_SEARCH_CONCURRENCY", "1"))
+SEARCH_MIN_SPACING_MS = int(os.environ.get("BROWSER_RELAY_SEARCH_MIN_SPACING_MS", "500"))
+
+search_in_flight: int = 0
+fetch_in_flight: int = 0
+last_search_dispatch: float = 0.0
+
 
 class Job:
     __slots__ = ("job_id", "kind", "payload", "event", "result", "dispatched")
@@ -81,6 +91,7 @@ async def _await_job(job: Job, queue: deque, timeout: float):
             queue.remove(job)
         except ValueError:
             pass
+        _release(job)
 
 
 @app.get("/version")
@@ -117,14 +128,47 @@ async def fetch(url: str, include_html: bool = False, driver: str = "relay"):
 
 @app.get("/pending")
 async def pending():
-    global last_poll_time
+    global last_poll_time, search_in_flight, fetch_in_flight, last_search_dispatch
     last_poll_time = time.monotonic()
+    now = time.monotonic()
     batch = []
-    for queue in (search_queue, fetch_queue):
-        for job in list(queue):
-            job.dispatched = True
-            batch.append({"job_id": job.job_id, "kind": job.kind, **job.payload})
+
+    # Searches: near-serial with spacing.
+    while (
+        search_queue
+        and search_in_flight < SEARCH_CONCURRENCY
+        and (now - last_search_dispatch) * 1000 >= SEARCH_MIN_SPACING_MS
+    ):
+        job = search_queue[0]
+        if job.dispatched:
+            break
+        job.dispatched = True
+        search_in_flight += 1
+        last_search_dispatch = now
+        batch.append({"job_id": job.job_id, "kind": job.kind, **job.payload})
+
+    # Fetches: parallel up to FETCH_CAP.
+    for job in fetch_queue:
+        if fetch_in_flight >= FETCH_CAP:
+            break
+        if job.dispatched:
+            continue
+        job.dispatched = True
+        fetch_in_flight += 1
+        batch.append({"job_id": job.job_id, "kind": job.kind, **job.payload})
+
     return {"jobs": batch, "close_tabs": []}
+
+
+def _release(job: Job):
+    global search_in_flight, fetch_in_flight
+    if not job.dispatched:
+        return
+    job.dispatched = False
+    if job.kind == "search":
+        search_in_flight = max(0, search_in_flight - 1)
+    else:
+        fetch_in_flight = max(0, fetch_in_flight - 1)
 
 
 @app.post("/result/{job_id}")
@@ -133,5 +177,6 @@ async def post_result(job_id: str, body: ResultBody):
     if not job:
         raise HTTPException(404, "job not found or expired")
     job.result = body.model_dump()
+    _release(job)
     job.event.set()
     return {"status": "ok"}

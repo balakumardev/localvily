@@ -1,6 +1,7 @@
 import httpx
 from httpx import ASGITransport
 
+import browser_relay.app as appmod
 from browser_relay import __version__
 from browser_relay.app import app
 
@@ -17,6 +18,7 @@ async def test_version_endpoint():
 
 
 async def test_health_reports_ok_and_disconnected_before_any_poll():
+    appmod.last_poll_time = 0.0  # isolate from any prior /pending poll in the suite
     async with await _client() as client:
         resp = await client.get("/health")
     body = resp.json()
