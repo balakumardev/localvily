@@ -55,3 +55,24 @@ async def test_result_frees_fetch_capacity(client):
     assert len(r2.json()["jobs"]) == 1  # the 6th job now fits
     for t in tasks:
         t.cancel()
+
+
+async def test_timeout_frees_fetch_capacity(client, monkeypatch):
+    # The spec names "a counter not released on timeout permanently starves capacity"
+    # as the highest-risk failure mode. Force a dispatched fetch to time out (never
+    # answered) and assert the freed slot lets a queued job dispatch.
+    monkeypatch.setattr(appmod, "FETCH_TIMEOUT", 0.15)
+    tasks = await _enqueue(client, "fetch", 6)
+    r1 = await client.get("/pending")
+    assert len(r1.json()["jobs"]) == appmod.FETCH_CAP  # 5 dispatched, 1 still queued
+    assert appmod.fetch_in_flight == appmod.FETCH_CAP
+
+    # Let the 5 dispatched calls hit FETCH_TIMEOUT without any /result posted.
+    await asyncio.gather(*tasks)  # each returns a 504 response; timeout path runs _release
+
+    assert appmod.fetch_in_flight == 0  # every dispatched counter released on timeout
+    # The 6th job's caller also timed out and dequeued itself, so nothing remains —
+    # capacity is fully restored rather than permanently starved.
+    r2 = await client.get("/pending")
+    assert r2.json()["jobs"] == []
+    assert appmod.fetch_in_flight == 0
