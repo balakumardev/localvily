@@ -51,6 +51,22 @@ async def test_health_lists_pending_actions(client):
     rec = Action("search", {"query": "q", "engine": "bing"}, 7, "solve_captcha")
     appmod.actions[rec.resume_token] = rec
     body = (await client.get("/health")).json()
-    assert any(p["resume_token"] == rec.resume_token and p["action"] == "solve_captcha"
-               for p in body["pending_actions"])
+    entry = next((p for p in body["pending_actions"] if p["resume_token"] == rec.resume_token), None)
+    assert entry is not None
+    assert entry["action"] == "solve_captcha"
+    assert entry["driver"] == "relay"
+    assert entry["query"] == "q"
+    assert "since_seconds" in entry
+    appmod.actions.clear()
+
+
+async def test_health_excludes_resolved_pending_actions(client):
+    # The pending_actions list is a live view — a resolved action must not appear.
+    appmod.actions.clear()
+    from browser_relay.app import Action
+    rec = Action("fetch", {"url": "https://e/x"}, 9, "login")
+    rec.resolved = True
+    appmod.actions[rec.resume_token] = rec
+    body = (await client.get("/health")).json()
+    assert all(p["resume_token"] != rec.resume_token for p in body["pending_actions"])
     appmod.actions.clear()
