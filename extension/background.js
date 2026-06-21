@@ -1,3 +1,5 @@
+import { getEngine } from "./engines/index.js";
+
 const DEFAULT_SERVER = "http://localhost:15552";
 const POLL_INTERVAL = 1500;
 const ALARM_NAME = "poll-relay";
@@ -93,9 +95,8 @@ async function openOrReuseTab(job, url) {
 }
 
 async function handleSearch(job) {
-  // Build the SERP URL using the injected engine logic via a function call in the worker.
-  // We import the module here (service worker is type:module).
-  const { getEngine } = await import("./engines/index.js");
+  // getEngine is statically imported at the top — dynamic import() is disallowed
+  // in an MV3 service worker (ServiceWorkerGlobalScope), even a module worker.
   const engine = getEngine(job.engine);
   const url = engine.serpUrl(job.query, job.k || 10);
 
