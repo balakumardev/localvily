@@ -13,10 +13,19 @@ QUERY_TIMEOUT = 110.0
 FETCH_TIMEOUT = 60.0
 
 import os
+import secrets
 
 FETCH_CAP = int(os.environ.get("BROWSER_RELAY_FETCH_CAP", "5"))
 SEARCH_CONCURRENCY = int(os.environ.get("BROWSER_RELAY_SEARCH_CONCURRENCY", "1"))
 SEARCH_MIN_SPACING_MS = int(os.environ.get("BROWSER_RELAY_SEARCH_MIN_SPACING_MS", "500"))
+ACTION_TTL = float(os.environ.get("BROWSER_RELAY_ACTION_TTL", "300"))
+
+_ACTION_MESSAGES = {
+    "solve_captcha": "The search engine is showing a CAPTCHA. A browser window has been "
+                     "opened — please solve the challenge, then call resume with this token.",
+    "login": "The page requires sign-in. A browser window has been opened — please log in, "
+             "then call resume with this token.",
+}
 
 search_in_flight: int = 0
 fetch_in_flight: int = 0
@@ -40,6 +49,22 @@ search_queue: deque[Job] = deque()
 fetch_queue: deque[Job] = deque()
 last_poll_time: float = 0.0
 
+
+class Action:
+    __slots__ = ("resume_token", "kind", "payload", "tab_id", "action", "created_at", "resolved")
+
+    def __init__(self, kind: str, payload: dict, tab_id, action: str):
+        self.resume_token = secrets.token_urlsafe(12)
+        self.kind = kind            # "search" | "fetch"
+        self.payload = payload      # original job payload (query/engine/k or url)
+        self.tab_id = tab_id
+        self.action = action        # "solve_captcha" | "login"
+        self.created_at = time.monotonic()
+        self.resolved = False
+
+
+actions: dict[str, Action] = {}
+
 app = FastAPI()
 
 
@@ -53,13 +78,37 @@ def _extension_connected() -> bool:
     return (time.monotonic() - last_poll_time) <= EXTENSION_RECENT_POLL_THRESHOLD
 
 
+def _register_action(job: "Job", action: str, tab_id) -> Action:
+    record = Action(job.kind, dict(job.payload), tab_id, action)
+    actions[record.resume_token] = record
+    return record
+
+
+def _action_required_payload(record: Action) -> dict:
+    base = {
+        "status": "action_required",
+        "driver": "relay",
+        "action": record.action,
+        "message": _ACTION_MESSAGES.get(record.action, "Action required in the browser window."),
+        "resume_token": record.resume_token,
+    }
+    if record.kind == "search":
+        base["query"] = record.payload.get("query")
+        base["engine"] = record.payload.get("engine")
+    else:
+        base["url"] = record.payload.get("url")
+    return base
+
+
 def _shape_search(job: Job) -> dict:
+    result = job.result or {"error": "no result"}
+    if result.get("status") == "action_required":
+        return result  # already shaped by post_result
     base = {
         "query": job.payload["query"],
         "engine": job.payload["engine"],
         "driver": "relay",
     }
-    result = job.result or {"error": "no result"}
     if "error" in result:
         return {"status": "error", **base, "error": result["error"]}
     results = result.get("results", [])
@@ -67,8 +116,10 @@ def _shape_search(job: Job) -> dict:
 
 
 def _shape_fetch(job: Job) -> dict:
-    base = {"url": job.payload["url"], "driver": "relay"}
     result = job.result or {"error": "no result"}
+    if result.get("status") == "action_required":
+        return result
+    base = {"url": job.payload["url"], "driver": "relay"}
     if "error" in result:
         return {"status": "error", **base, "error": result["error"]}
     out = {"status": "ok", **base}
@@ -192,7 +243,12 @@ async def post_result(job_id: str, body: ResultBody):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "job not found or expired")
-    job.result = body.model_dump()
+    data = body.model_dump()
+    if data.get("action_required"):
+        record = _register_action(job, data.get("action", "solve_captcha"), data.get("tab_id"))
+        job.result = _action_required_payload(record)
+    else:
+        job.result = data
     _release(job)
     job.event.set()
     return {"status": "ok"}
