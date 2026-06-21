@@ -115,3 +115,57 @@ async def test_expired_action_is_swept_and_tab_queued_for_close(client, monkeypa
     # The expired action's tab is queued for the extension to close.
     pend = (await client.get("/pending")).json()
     assert 321 in pend["close_tabs"]
+
+
+async def test_repeated_still_blocked_resume_keeps_one_stable_token(client):
+    # The trickiest invariant: resuming while STILL blocked must keep exactly one
+    # action record under the SAME original token (no orphan leak), across rounds,
+    # until it finally clears. Serve each job EXACTLY ONCE here (as the real
+    # extension does — one /result per /pending job), rather than via the
+    # grace-polling drive_extension helper which would answer a job repeatedly.
+    async def serve_one(body):
+        for _ in range(200):
+            jobs = (await client.get("/pending")).json()["jobs"]
+            if jobs:
+                await client.post(f"/result/{jobs[0]['job_id']}", json=body)
+                return jobs[0]
+            await asyncio.sleep(0.005)
+        raise AssertionError("no job was dispatched to serve")
+
+    blocked = {"action_required": True, "action": "solve_captcha", "tab_id": 8}
+    ok = {"results": [{"title": "T", "url": "https://e", "snippet": "s"}]}
+
+    # Initial search escalates.
+    caller = asyncio.create_task(client.get("/search", params={"q": "x"}))
+    await serve_one(blocked)
+    resp = await caller
+    token = resp.json()["resume_token"]
+    assert resp.json()["status"] == "action_required"
+    assert len(appmod.actions) == 1
+
+    # First resume → still blocked: SAME token, still exactly one record.
+    r1task = asyncio.create_task(client.post(f"/resume/{token}"))
+    await serve_one(blocked)
+    b1 = (await r1task).json()
+    assert b1["status"] == "action_required"
+    assert b1["resume_token"] == token
+    assert len(appmod.actions) == 1
+    assert token in appmod.actions
+
+    # Second resume → still blocked again: invariant must hold across rounds.
+    r2task = asyncio.create_task(client.post(f"/resume/{token}"))
+    await serve_one(blocked)
+    b2 = (await r2task).json()
+    assert b2["status"] == "action_required"
+    assert b2["resume_token"] == token
+    assert len(appmod.actions) == 1
+
+    # Third resume → cleared: token resolved + removed; a further resume errors.
+    r3task = asyncio.create_task(client.post(f"/resume/{token}"))
+    await serve_one(ok)
+    b3 = (await r3task).json()
+    assert b3["status"] == "ok"
+    assert b3["count"] == 1
+    assert token not in appmod.actions
+    again = (await client.post(f"/resume/{token}")).json()
+    assert again["status"] == "error"
