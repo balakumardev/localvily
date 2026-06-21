@@ -7,6 +7,7 @@ Prerequisites:
 Run: `uv run --with httpx python tests/acceptance/run_acceptance.py`
 """
 import asyncio
+import os
 import sys
 
 import httpx
@@ -75,8 +76,8 @@ async def main() -> int:
                 f"C3: burst had search_errors={search_errors} search_empties={search_empties} "
                 f"fetch_errors={fetch_errors} fetch_empties={fetch_empties} (must all be 0)")
 
-        import os
-        if os.environ.get("BROWSER_RELAY_ACCEPT_CLOAK") == "1":
+        ran_cloak = os.environ.get("BROWSER_RELAY_ACCEPT_CLOAK") == "1"
+        if ran_cloak:
             cf = (await c.get("/fetch", params={"url": "https://en.wikipedia.org/wiki/Consistent_hashing", "driver": "cloak"})).json()
             print(f"C6 cloak fetch length={cf.get('length')} status={cf.get('status')}")
             if cf.get("status") != "ok" or cf.get("length", 0) < 1000:
@@ -86,7 +87,10 @@ async def main() -> int:
         for f in failures:
             print("FAIL", f)
         return 1
-    print("\nALL ACCEPTANCE CRITERIA PASSED (C1, C2, C3, C4)")
+    ran = ["C1", "C2", "C3", "C4"]
+    if ran_cloak:
+        ran.append("C6")
+    print(f"\nALL ACCEPTANCE CRITERIA PASSED ({', '.join(ran)})")
     return 0
 
 

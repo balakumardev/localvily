@@ -50,6 +50,7 @@ class CloakDriver:
         self.available = False
         self._error = None
         self._sem = asyncio.Semaphore(FETCH_CAP)
+        self._search_sem = asyncio.Semaphore(1)  # serialize cloak searches (anti-CAPTCHA, mirrors relay)
         self._js = {}
         self._js_error = None
         d = _shared_js_dir()
@@ -163,27 +164,29 @@ class CloakDriver:
             pass
 
     async def search(self, query: str, k: int = 10, engine: str = "bing") -> dict:
+        engine = "bing"  # only Bing is supported by the cloak SERP path today
         if not self.available:
             await self.start()
         if not self.available:
             return self._unavailable()
         base = {"query": query, "engine": engine, "driver": "cloak"}
-        page = None
-        try:
-            page = await self._ctx.new_page()
-            await page.goto(_serp_url(query, k), timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
-            await page.wait_for_timeout(SETTLE_MS)
-            res = await self._eval_serp(page, k)
-            if res.get("blocked"):
-                await page.bring_to_front()
-                # _page handed to the relay's action registry — intentionally NOT closed.
-                return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
-            await page.close()
-            results = res.get("results", [])
-            return {"status": "ok", **base, "count": len(results), "results": results}
-        except Exception as exc:
-            await self._safe_close(page)  # don't leak a visible tab on failure
-            return {"status": "error", **base, "error": f"{type(exc).__name__}: {exc}"}
+        async with self._search_sem:
+            page = None
+            try:
+                page = await self._ctx.new_page()
+                await page.goto(_serp_url(query, k), timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                await page.wait_for_timeout(SETTLE_MS)
+                res = await self._eval_serp(page, k)
+                if res.get("blocked"):
+                    await page.bring_to_front()
+                    # _page handed to the relay's action registry — intentionally NOT closed.
+                    return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
+                await page.close()
+                results = res.get("results", [])
+                return {"status": "ok", **base, "count": len(results), "results": results}
+            except Exception as exc:
+                await self._safe_close(page)  # don't leak a visible tab on failure
+                return {"status": "error", **base, "error": f"{type(exc).__name__}: {exc}"}
 
     async def fetch(self, url: str, include_html: bool = False) -> dict:
         if not self.available:
@@ -235,9 +238,11 @@ class CloakDriver:
             if not content.get("text"):
                 await page.close()
                 return {"status": "error", **base, "error": "no extractable content"}
+            if payload.get("include_html"):
+                content = {**content, "html": await page.content()}
             await page.close()
             return {"status": "ok", **base, **{k: content[k] for k in
-                    ("title", "text", "excerpt", "length") if k in content}}
+                    ("title", "text", "excerpt", "length", "html") if k in content}}
         except Exception as exc:
             await self._safe_close(page)
             driver_base = {"driver": "cloak"}

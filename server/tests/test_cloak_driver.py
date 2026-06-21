@@ -43,6 +43,19 @@ async def test_cloak_fetch_real_page_returns_text():
         await drv.close()
 
 
+def test_serp_url_only_targets_bing():
+    from browser_relay.drivers.cloak import _serp_url
+    u = _serp_url("consistent hashing", 10)
+    assert u.startswith("https://www.bing.com/search?")
+
+
+def test_driver_has_search_semaphore():
+    drv = CloakDriver()
+    # cloak search must be throttled like relay (anti-CAPTCHA), not unbounded
+    assert hasattr(drv, "_search_sem")
+    assert drv._search_sem._value == 1
+
+
 @pytest.mark.skipif(not _chromium_available(),
                     reason="set BROWSER_RELAY_RUN_CLOAK_TESTS=1 with chromium installed to run live cloak tests")
 async def test_cloak_search_real_returns_results():

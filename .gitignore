@@ -13,3 +13,8 @@ uv.lock
 
 # Node
 node_modules/
+
+# Browser relay
+.cloak-profile/
+dist/
+build/
