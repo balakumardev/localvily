@@ -45,4 +45,21 @@ function extractContent(doc, ReadabilityCtor) {
   return { title, text, excerpt, length: text.length };
 }
 
+// Heuristic: does this page look like it is gating content behind sign-in?
+// Conservative — only fires on strong signals so normal articles aren't misflagged.
+function detectLoginWall(doc) {
+  const url = (doc.location && doc.location.href) || "";
+  if (/\/login|\/signin|\/sign-in|accounts\.google\.com|auth/i.test(url)) {
+    // A password field present on a login-looking URL is a strong signal.
+    if (doc.querySelector('input[type="password"]')) return true;
+  }
+  const bodyText = (doc.body?.textContent || "").toLowerCase();
+  const hasPassword = !!doc.querySelector('input[type="password"]');
+  if (hasPassword && /(sign in|log in|sign-in|log-in)/.test(bodyText) && bodyText.length < 4000) {
+    return true; // small page dominated by a login form
+  }
+  return false;
+}
+
 globalThis.__extract = (doc) => extractContent(doc, window.Readability);
+globalThis.__detectLogin = (doc) => detectLoginWall(doc);

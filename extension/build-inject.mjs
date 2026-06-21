@@ -39,7 +39,7 @@ writeFileSync(
 const extract = toClassic(readFileSync(new URL("./extract.js", import.meta.url), "utf8"), "extract.js");
 writeFileSync(
   new URL("./inject/extract.js", import.meta.url),
-  `${BANNER}${extract}\nglobalThis.__extract = (doc) => extractContent(doc, window.Readability);\n`,
+  `${BANNER}${extract}\nglobalThis.__extract = (doc) => extractContent(doc, window.Readability);\nglobalThis.__detectLogin = (doc) => detectLoginWall(doc);\n`,
 );
 
 console.log("wrote extension/inject/serp.js and extension/inject/extract.js");

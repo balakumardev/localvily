@@ -79,6 +79,19 @@ function waitForComplete(tabId, timeout) {
   });
 }
 
+async function openOrReuseTab(job, url) {
+  if (job.recheck_tab_id != null) {
+    try {
+      const tab = await chrome.tabs.get(job.recheck_tab_id);
+      return { tab, reused: true };
+    } catch {
+      // tab gone — fall through to a fresh one
+    }
+  }
+  const tab = await chrome.tabs.create({ url, active: false });
+  return { tab, reused: false };
+}
+
 async function handleSearch(job) {
   // Build the SERP URL using the injected engine logic via a function call in the worker.
   // We import the module here (service worker is type:module).
@@ -86,7 +99,8 @@ async function handleSearch(job) {
   const engine = getEngine(job.engine);
   const url = engine.serpUrl(job.query, job.k || 10);
 
-  const tab = await chrome.tabs.create({ url, active: false });
+  const { tab, reused } = await openOrReuseTab(job, url);
+  let escalated = false;
   try {
     await waitForComplete(tab.id, TAB_LOAD_TIMEOUT);
     await new Promise((r) => setTimeout(r, FETCH_SETTLE_MS));
@@ -100,32 +114,39 @@ async function handleSearch(job) {
       },
     });
     if (result.blocked) {
-      await postResult(job.job_id, { error: "blocked: bing challenge" });
+      escalated = true;
+      await chrome.tabs.update(tab.id, { active: true }); // surface to the user
+      await postResult(job.job_id, { action_required: true, action: "solve_captcha", tab_id: tab.id });
     } else {
       await postResult(job.job_id, { results: result.results });
     }
   } finally {
-    chrome.tabs.remove(tab.id).catch(() => {});
+    if (!escalated) chrome.tabs.remove(tab.id).catch(() => {});
   }
 }
 
 async function handleFetch(job) {
-  const tab = await chrome.tabs.create({ url: job.url, active: false });
+  const { tab, reused } = await openOrReuseTab(job, job.url);
+  let escalated = false;
   try {
     await waitForComplete(tab.id, TAB_LOAD_TIMEOUT);
     await new Promise((r) => setTimeout(r, FETCH_SETTLE_MS));
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["lib/Readability.js", "inject/extract.js"] });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => globalThis.__extract(document),
+      func: () => ({ login: globalThis.__detectLogin(document), content: globalThis.__extract(document) }),
     });
-    if (!result || !result.text) {
+    if (result.login) {
+      escalated = true;
+      await chrome.tabs.update(tab.id, { active: true });
+      await postResult(job.job_id, { action_required: true, action: "login", tab_id: tab.id });
+    } else if (!result.content || !result.content.text) {
       await postResult(job.job_id, { error: "no extractable content" });
     } else {
-      await postResult(job.job_id, result);
+      await postResult(job.job_id, result.content);
     }
   } finally {
-    chrome.tabs.remove(tab.id).catch(() => {});
+    if (!escalated) chrome.tabs.remove(tab.id).catch(() => {});
   }
 }
 
