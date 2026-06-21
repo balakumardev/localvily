@@ -367,6 +367,11 @@ async def search_and_fetch(query: str, k: int = 5, engine: str = "bing", driver:
         f = await _request("GET", "/fetch", params={"url": item["url"], "driver": driver})
         if f.get("status") == "ok":
             return {**item, "text": f.get("text", ""), "length": f.get("length", 0), "fetch_error": None}
+        if f.get("status") == "action_required":
+            # Per spec §18, per-result escalation is non-interactive inside the batch:
+            # record it so the caller can fetch(url) individually to drive the handoff.
+            return {**item, "text": "", "length": 0,
+                    "fetch_error": f"action_required: {f.get('action', 'login')}"}
         return {**item, "text": "", "length": 0, "fetch_error": f.get("error", "fetch failed")}
 
     merged = await asyncio.gather(*[_fetch_one(r) for r in results])
