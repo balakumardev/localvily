@@ -28,6 +28,11 @@ FETCH_CAP = int(os.environ.get("BROWSER_RELAY_FETCH_CAP", "5"))
 NAV_TIMEOUT_MS = int(os.environ.get("BROWSER_RELAY_CLOAK_NAV_TIMEOUT_MS", "20000"))
 SETTLE_MS = int(os.environ.get("BROWSER_RELAY_FETCH_SETTLE_MS", "800"))
 
+# Headless by default: the cloak browser runs invisibly (no foreground window).
+# Set BROWSER_RELAY_CLOAK_HEADLESS=0 to run headed — required for the CAPTCHA/login
+# escalation handoff, which needs a visible window for the human to act in.
+CLOAK_HEADLESS = os.environ.get("BROWSER_RELAY_CLOAK_HEADLESS", "1").lower() not in ("0", "false", "no")
+
 
 def _shared_js_dir() -> Path:
     override = os.environ.get("BROWSER_RELAY_SHARED_JS_DIR")
@@ -91,7 +96,7 @@ class CloakDriver:
             from patchright.async_api import async_playwright
             self._pw = await async_playwright().start()
             Path(CLOAK_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
-            launch_kwargs = dict(user_data_dir=CLOAK_PROFILE_DIR, headless=False)
+            launch_kwargs = dict(user_data_dir=CLOAK_PROFILE_DIR, headless=CLOAK_HEADLESS)
             try:
                 self._ctx = await self._pw.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
             except Exception:
@@ -164,6 +169,24 @@ class CloakDriver:
         except Exception:
             pass
 
+    async def _escalate(self, page, base: dict, action: str) -> dict:
+        """Produce the response for a detected CAPTCHA/login.
+
+        Headed: surface the window and hand the page to the action registry so the
+        user can solve it and resume. Headless: there is no window to show, so a
+        human handoff is impossible — close the page and return a clear error
+        telling the caller to run headed (BROWSER_RELAY_CLOAK_HEADLESS=0).
+        """
+        if CLOAK_HEADLESS:
+            await self._safe_close(page)
+            return {"status": "error", **base,
+                    "error": f"cloak hit a {action} challenge but runs headless; "
+                             "rerun with BROWSER_RELAY_CLOAK_HEADLESS=0 to solve it interactively, "
+                             "or use the relay driver"}
+        await page.bring_to_front()
+        # _page handed to the relay's action registry — intentionally NOT closed.
+        return {"status": "action_required", **base, "action": action, "_page": page}
+
     async def search(self, query: str, k: int = 10, engine: str = "bing") -> dict:
         engine = "bing"  # only Bing is supported by the cloak SERP path today
         if not self.available:
@@ -179,9 +202,7 @@ class CloakDriver:
                 await page.wait_for_timeout(SETTLE_MS)
                 res = await self._eval_serp(page, k)
                 if res.get("blocked"):
-                    await page.bring_to_front()
-                    # _page handed to the relay's action registry — intentionally NOT closed.
-                    return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
+                    return await self._escalate(page, base, "solve_captcha")
                 await page.close()
                 results = res.get("results", [])
                 return {"status": "ok", **base, "count": len(results), "results": results}
@@ -203,8 +224,7 @@ class CloakDriver:
                 await page.wait_for_timeout(SETTLE_MS)
                 res = await self._eval_extract(page)
                 if res.get("login"):
-                    await page.bring_to_front()
-                    return {"status": "action_required", **base, "action": "login", "_page": page}
+                    return await self._escalate(page, base, "login")
                 content = res.get("content") or {}
                 if not content.get("text"):
                     await page.close()
@@ -225,16 +245,14 @@ class CloakDriver:
                 base = {"query": payload.get("query"), "engine": payload.get("engine"), "driver": "cloak"}
                 res = await self._eval_serp(page, payload.get("k", 10))
                 if res.get("blocked"):
-                    await page.bring_to_front()
-                    return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
+                    return await self._escalate(page, base, "solve_captcha")
                 await page.close()
                 results = res.get("results", [])
                 return {"status": "ok", **base, "count": len(results), "results": results}
             base = {"url": payload.get("url"), "driver": "cloak"}
             res = await self._eval_extract(page)
             if res.get("login"):
-                await page.bring_to_front()
-                return {"status": "action_required", **base, "action": "login", "_page": page}
+                return await self._escalate(page, base, "login")
             content = res.get("content") or {}
             if not content.get("text"):
                 await page.close()
