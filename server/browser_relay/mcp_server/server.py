@@ -378,6 +378,19 @@ async def search_and_fetch(query: str, k: int = 5, engine: str = "bing", driver:
 
 
 @mcp.tool()
+async def resume(resume_token: str) -> str:
+    """Resume a search/fetch that paused for human action (CAPTCHA or login).
+
+    Call this after the user has solved the challenge / logged in, using the
+    resume_token from a previous action_required result. Returns the completed
+    result (status "ok"), "action_required" again if still blocked, or "error"
+    if the token expired.
+    """
+    result = await _request("POST", f"/resume/{resume_token}")
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def health() -> str:
     """Check relay + browser-extension connectivity and queue depth."""
     return json.dumps(await _request("GET", "/health"), indent=2)

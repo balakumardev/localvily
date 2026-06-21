@@ -43,3 +43,14 @@ async def test_health_reports_queue_depths_and_caps(client):
     assert body["engine"] == "bing"
     assert "version" in body
     t.cancel()
+
+
+async def test_health_lists_pending_actions(client):
+    appmod.actions.clear()
+    from browser_relay.app import Action
+    rec = Action("search", {"query": "q", "engine": "bing"}, 7, "solve_captcha")
+    appmod.actions[rec.resume_token] = rec
+    body = (await client.get("/health")).json()
+    assert any(p["resume_token"] == rec.resume_token and p["action"] == "solve_captcha"
+               for p in body["pending_actions"])
+    appmod.actions.clear()

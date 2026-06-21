@@ -189,6 +189,18 @@ DEFAULT_ENGINE = os.environ.get("BROWSER_RELAY_DEFAULT_ENGINE", "bing")
 async def health():
     poll_age = None if last_poll_time == 0 else round(time.monotonic() - last_poll_time, 1)
     connected = _extension_connected()
+    now_m = time.monotonic()
+    pending_actions = [
+        {
+            "resume_token": a.resume_token,
+            "action": a.action,
+            "driver": "relay",
+            "since_seconds": round(now_m - a.created_at, 1),
+            **({"query": a.payload.get("query")} if a.kind == "search" else {"url": a.payload.get("url")}),
+        }
+        for a in actions.values()
+        if not a.resolved
+    ]
     return {
         "status": "ok",
         "extension_connected": connected,
@@ -199,6 +211,7 @@ async def health():
         "in_flight": search_in_flight + fetch_in_flight,
         "max_fetch_tabs": FETCH_CAP,
         "engine": DEFAULT_ENGINE,
+        "pending_actions": pending_actions,
         "version": __version__,
     }
 
