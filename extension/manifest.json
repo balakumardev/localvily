@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Relay (search & fetch)",
+  "version": "0.1.0",
+  "description": "Drives your logged-in browser as an unlimited web search & fetch backend for a local MCP server",
+  "permissions": ["tabs", "scripting", "alarms", "storage"],
+  "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*"],
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_popup": "popup.html", "default_title": "Browser Relay" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_ui": { "page": "options.html", "open_in_tab": false }
+}
