@@ -15,6 +15,8 @@ test("serpUrl builds a bing search URL with the encoded query", () => {
   const u = serpUrl("consistent hashing", 10);
   assert.match(u, /^https:\/\/www\.bing\.com\/search\?/);
   assert.match(u, /q=consistent(\+|%20)hashing/);
+  // Must NOT carry &count= — Bing serves a degraded SERP for that non-human param.
+  assert.ok(!/[?&]count=/.test(u), "serpUrl must not include a count param");
 });
 
 test("parse extracts at least 8 results with title/url/snippet from a real SERP", () => {

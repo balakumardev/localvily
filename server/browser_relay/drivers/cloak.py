@@ -39,8 +39,9 @@ def _shared_js_dir() -> Path:
 
 def _serp_url(query: str, k: int) -> str:
     from urllib.parse import quote_plus
-    count = max(1, min(k, 50))
-    return f"https://www.bing.com/search?q={quote_plus(query)}&count={count}"
+    # No &count= — Bing serves a degraded/irrelevant SERP for that non-human param
+    # (mirrors extension/engines/bing.js serpUrl). Over-fetch the default and slice.
+    return f"https://www.bing.com/search?q={quote_plus(query)}"
 
 
 class CloakDriver:

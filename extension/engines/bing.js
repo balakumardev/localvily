@@ -25,8 +25,11 @@ const TITLE_LINK_SELECTOR = "h2 a";
 const SNIPPET_SELECTORS = [".b_caption p", "p.b_lineclamp2", "p.b_lineclamp3", ".b_caption"];
 
 export function serpUrl(query, k = 10) {
-  const count = Math.max(1, Math.min(k, 50));
-  return `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${count}`;
+  // NOTE: do NOT append &count=N. Bing serves a degraded/irrelevant SERP for
+  // requests carrying count= (a non-human param) — confirmed live: the bare
+  // query returns correct results, &count=10 returns junk. We over-fetch the
+  // default ~10 organic results and the parser slices to k.
+  return `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
 }
 
 export function detectBlock(doc) {
