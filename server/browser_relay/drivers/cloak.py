@@ -9,9 +9,20 @@ import asyncio
 import os
 from pathlib import Path
 
+def _user_cache_dir() -> Path:
+    import sys
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    elif os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return base / "browser-relay"
+
+
 CLOAK_PROFILE_DIR = os.environ.get(
     "BROWSER_RELAY_CLOAK_PROFILE_DIR",
-    str(Path(__file__).resolve().parents[3] / ".cloak-profile"),
+    str(_user_cache_dir() / "cloak-profile"),
 )
 FETCH_CAP = int(os.environ.get("BROWSER_RELAY_FETCH_CAP", "5"))
 NAV_TIMEOUT_MS = int(os.environ.get("BROWSER_RELAY_CLOAK_NAV_TIMEOUT_MS", "20000"))
