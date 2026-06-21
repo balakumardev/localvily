@@ -88,13 +88,33 @@ def _register_cloak_action(driver_result: dict, kind: str, payload: dict) -> dic
     return _action_required_payload(record)
 
 
+async def _release_action_resources(record):
+    """Release the browser resource a paused action was holding, per driver.
+
+    relay: tab_id is a Chrome tab id — queue it for the extension to close.
+    cloak: tab_id is an int handle into cloak_pages holding a live patchright
+    page — pop and close it directly (it must NOT go to the extension's
+    close_tabs, which only understands real Chrome tab ids).
+    """
+    if record is None or record.tab_id is None:
+        return
+    if record.driver == "cloak":
+        page = cloak_pages.pop(record.tab_id, None)
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+    else:
+        action_close_queue.append(record.tab_id)
+
+
 async def _sweep_expired_actions():
     now = time.monotonic()
     expired = [t for t, a in actions.items() if not a.resolved and (now - a.created_at) >= ACTION_TTL]
     for token in expired:
         record = actions.pop(token, None)
-        if record and record.tab_id is not None:
-            action_close_queue.append(record.tab_id)
+        await _release_action_resources(record)
 
 
 @asynccontextmanager
@@ -356,8 +376,7 @@ async def resume(token: str):
         return {"status": "error", "error": "action already resolved or unknown"}
     if (time.monotonic() - record.created_at) >= ACTION_TTL:
         actions.pop(token, None)
-        if record.tab_id is not None:
-            action_close_queue.append(record.tab_id)
+        await _release_action_resources(record)
         return {"status": "error", "error": "action expired"}
 
     if record.driver == "cloak":

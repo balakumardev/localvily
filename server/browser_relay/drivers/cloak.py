@@ -40,22 +40,39 @@ class CloakDriver:
         self._error = None
         self._sem = asyncio.Semaphore(FETCH_CAP)
         self._js = {}
+        self._js_error = None
         d = _shared_js_dir()
+        missing = []
         for key, rel in (("serp", "inject/serp.js"), ("readability", "lib/Readability.js"),
                          ("extract", "inject/extract.js")):
             p = d / rel
-            self._js[key] = p.read_text(encoding="utf-8") if p.exists() else ""
+            if p.exists():
+                self._js[key] = p.read_text(encoding="utf-8")
+            else:
+                self._js[key] = ""
+                missing.append(str(p))
+        if missing:
+            # Fail loud rather than silently eval("") (which leaves globalThis.__serp
+            # undefined and breaks every cloak call at request time). Surfaced via
+            # status()/start() so /health.drivers.cloak reports it.
+            self._js_error = f"shared JS not found: {', '.join(missing)}"
 
     def status(self) -> dict:
+        err = self._error or self._js_error
         return {
             "available": self.available,
             "profile_path": CLOAK_PROFILE_DIR,
             "pages_open": 0 if not self._ctx else len(self._ctx.pages),
-            **({"error": self._error} if self._error else {}),
+            **({"error": err} if err else {}),
         }
 
     async def start(self):
         if self.available:
+            return
+        if self._js_error:
+            # No point launching a browser we can't inject our logic into.
+            self._error = self._js_error
+            self.available = False
             return
         try:
             from patchright.async_api import async_playwright

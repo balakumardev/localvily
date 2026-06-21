@@ -141,3 +141,41 @@ async def test_cloak_resume_still_blocked_keeps_token(client, monkeypatch):
     r2 = (await client.post(f"/resume/{token}")).json()
     assert r2["status"] == "ok"
     assert token not in appmod.actions
+
+
+class _ClosablePage:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+async def test_expired_cloak_action_closes_page_not_relay_close_tabs(client, monkeypatch):
+    # When a cloak action expires via TTL, its held patchright page must be
+    # closed + dropped from cloak_pages — NOT pushed onto the relay close_tabs
+    # queue (whose ids are real Chrome tab ids). Regression test for the
+    # cross-driver expiry bug.
+    monkeypatch.setattr(appmod, "ACTION_TTL", 0.0)  # immediately expired
+    page = _ClosablePage()
+
+    class BlockingSearchDriver(FakeCloakDriver):
+        async def search(self, query, k=10, engine="bing"):
+            return {"status": "action_required", "query": query, "engine": engine,
+                    "driver": "cloak", "action": "solve_captcha", "_page": page}
+
+    fake = BlockingSearchDriver()
+    monkeypatch.setattr(appmod, "get_cloak_driver", lambda: fake)
+
+    resp = await client.get("/search", params={"q": "x", "driver": "cloak"})
+    token = resp.json()["resume_token"]
+    handle = appmod.actions[token].tab_id
+    assert handle in appmod.cloak_pages
+
+    await appmod._sweep_expired_actions()
+
+    assert token not in appmod.actions
+    assert handle not in appmod.cloak_pages       # page handle freed
+    assert page.closed is True                    # the patchright page was closed
+    pend = (await client.get("/pending")).json()
+    assert handle not in pend["close_tabs"]       # NOT misrouted to the extension
