@@ -99,7 +99,7 @@ async function handleSearch(job) {
   const engine = getEngine(job.engine);
   const url = engine.serpUrl(job.query, job.k || 10);
 
-  const { tab, reused } = await openOrReuseTab(job, url);
+  const { tab } = await openOrReuseTab(job, url);
   let escalated = false;
   try {
     await waitForComplete(tab.id, TAB_LOAD_TIMEOUT);
@@ -114,9 +114,11 @@ async function handleSearch(job) {
       },
     });
     if (result.blocked) {
-      escalated = true;
-      await chrome.tabs.update(tab.id, { active: true }); // surface to the user
+      // Surface the tab and register the action FIRST; only then mark escalated
+      // so the tab is kept. If surfacing/POST throws, the finally still cleans up.
+      await chrome.tabs.update(tab.id, { active: true });
       await postResult(job.job_id, { action_required: true, action: "solve_captcha", tab_id: tab.id });
+      escalated = true;
     } else {
       await postResult(job.job_id, { results: result.results });
     }
@@ -126,7 +128,7 @@ async function handleSearch(job) {
 }
 
 async function handleFetch(job) {
-  const { tab, reused } = await openOrReuseTab(job, job.url);
+  const { tab } = await openOrReuseTab(job, job.url);
   let escalated = false;
   try {
     await waitForComplete(tab.id, TAB_LOAD_TIMEOUT);
@@ -137,9 +139,9 @@ async function handleFetch(job) {
       func: () => ({ login: globalThis.__detectLogin(document), content: globalThis.__extract(document) }),
     });
     if (result.login) {
-      escalated = true;
       await chrome.tabs.update(tab.id, { active: true });
       await postResult(job.job_id, { action_required: true, action: "login", tab_id: tab.id });
+      escalated = true;
     } else if (!result.content || !result.content.text) {
       await postResult(job.job_id, { error: "no extractable content" });
     } else {

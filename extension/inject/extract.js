@@ -49,7 +49,9 @@ function extractContent(doc, ReadabilityCtor) {
 // Conservative — only fires on strong signals so normal articles aren't misflagged.
 function detectLoginWall(doc) {
   const url = (doc.location && doc.location.href) || "";
-  if (/\/login|\/signin|\/sign-in|accounts\.google\.com|auth/i.test(url)) {
+  // Match login-ish URL segments only (anchored to / or ? boundaries) so "author",
+  // "authority", etc. don't trip it. Paired with the password-field AND-guard below.
+  if (/[/.](login|signin|sign-in|auth|oauth|sso)([/?#]|$)|accounts\.google\.com/i.test(url)) {
     // A password field present on a login-looking URL is a strong signal.
     if (doc.querySelector('input[type="password"]')) return true;
   }
