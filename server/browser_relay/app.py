@@ -356,6 +356,27 @@ async def resume(token: str):
             action_close_queue.append(record.tab_id)
         return {"status": "error", "error": "action expired"}
 
+    if record.driver == "cloak":
+        page = cloak_pages.pop(record.tab_id, None)
+        if page is None:
+            actions.pop(token, None)
+            return {"status": "error", "error": "cloak page no longer available"}
+        result = await get_cloak_driver().recheck(page, record.kind, dict(record.payload))
+        if result.get("status") == "action_required":
+            # Still blocked: re-hold the (possibly same) page under a fresh handle,
+            # keep the ORIGINAL token, refresh TTL.
+            new_payload = _register_cloak_action(result, record.kind, dict(record.payload))
+            new_token = new_payload["resume_token"]
+            actions[token] = actions.pop(new_token)
+            actions[token].resume_token = token
+            actions[token].created_at = time.monotonic()
+            new_payload["resume_token"] = token
+            return new_payload
+        record.resolved = True
+        actions.pop(token, None)
+        return result
+
+    # --- relay path (existing) ---
     # Enqueue a recheck job that re-uses the held tab.
     payload = dict(record.payload)
     payload["recheck_tab_id"] = record.tab_id

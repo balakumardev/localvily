@@ -77,3 +77,67 @@ async def test_health_has_drivers_substructure(client, monkeypatch):
     assert body["drivers"]["cloak"]["available"] is True
     # backward-compat: top-level relay fields still present
     assert "extension_connected" in body
+
+
+class ReCheckCloakDriver(FakeCloakDriver):
+    def __init__(self, recheck_results):
+        super().__init__()
+        self._recheck_results = list(recheck_results)
+
+    async def recheck(self, page, kind, payload):
+        r = self._recheck_results.pop(0)
+        return r
+
+
+async def test_cloak_resume_clears_and_resolves(client, monkeypatch):
+    # First a block, then resume → recheck returns ok.
+    fake = ReCheckCloakDriver([
+        {"status": "ok", "url": "https://x", "driver": "cloak",
+         "title": "D", "text": "z" * 1100, "length": 1100},
+    ])
+    monkeypatch.setattr(appmod, "get_cloak_driver", lambda: fake)
+
+    # Block first (fetch login).
+    monkeypatch.setattr(fake, "fetch", _blocking_fetch)
+    resp = await client.get("/fetch", params={"url": "https://x", "driver": "cloak"})
+    token = resp.json()["resume_token"]
+    assert resp.json()["status"] == "action_required"
+    assert appmod.actions[token].driver == "cloak"
+
+    # Resume → recheck ok → resolved + page handle freed.
+    rresp = await client.post(f"/resume/{token}")
+    rbody = rresp.json()
+    assert rbody["status"] == "ok"
+    assert rbody["driver"] == "cloak"
+    assert token not in appmod.actions
+    again = (await client.post(f"/resume/{token}")).json()
+    assert again["status"] == "error"
+
+
+async def _blocking_fetch(url, include_html=False):
+    return {"status": "action_required", "url": url, "driver": "cloak",
+            "action": "login", "_page": object()}
+
+
+async def test_cloak_resume_still_blocked_keeps_token(client, monkeypatch):
+    fake = ReCheckCloakDriver([
+        {"status": "action_required", "url": "https://x", "driver": "cloak",
+         "action": "login", "_page": object()},
+        {"status": "ok", "url": "https://x", "driver": "cloak", "title": "D",
+         "text": "z" * 1100, "length": 1100},
+    ])
+    monkeypatch.setattr(appmod, "get_cloak_driver", lambda: fake)
+    monkeypatch.setattr(fake, "fetch", _blocking_fetch)
+
+    resp = await client.get("/fetch", params={"url": "https://x", "driver": "cloak"})
+    token = resp.json()["resume_token"]
+
+    r1 = (await client.post(f"/resume/{token}")).json()
+    assert r1["status"] == "action_required"
+    assert r1["resume_token"] == token        # same token kept
+    assert token in appmod.actions
+    assert len(appmod.actions) == 1
+
+    r2 = (await client.post(f"/resume/{token}")).json()
+    assert r2["status"] == "ok"
+    assert token not in appmod.actions
