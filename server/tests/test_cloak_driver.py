@@ -6,11 +6,11 @@ import pytest
 from browser_relay.drivers.cloak import CloakDriver, _shared_js_dir
 
 
-def test_shared_js_dir_resolves_to_extension_with_inject_files():
+def test_shared_js_dir_resolves_to_packaged_flat_files():
     d = _shared_js_dir()
-    assert (d / "inject" / "serp.js").exists(), f"serp.js not found under {d}"
-    assert (d / "inject" / "extract.js").exists()
-    assert (d / "lib" / "Readability.js").exists()
+    assert (d / "serp.js").exists(), f"serp.js not found under {d}"
+    assert (d / "extract.js").exists()
+    assert (d / "Readability.js").exists()
 
 
 def test_driver_status_before_start_reports_unavailable():

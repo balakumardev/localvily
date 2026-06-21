@@ -22,8 +22,8 @@ def _shared_js_dir() -> Path:
     override = os.environ.get("BROWSER_RELAY_SHARED_JS_DIR")
     if override:
         return Path(override)
-    # repo_root/server/browser_relay/drivers/cloak.py -> repo_root/extension
-    return Path(__file__).resolve().parents[3] / "extension"
+    # Packaged copy shipped inside browser_relay (works under any install layout).
+    return Path(__file__).resolve().parent.parent / "shared_js"
 
 
 def _serp_url(query: str, k: int) -> str:
@@ -43,8 +43,8 @@ class CloakDriver:
         self._js_error = None
         d = _shared_js_dir()
         missing = []
-        for key, rel in (("serp", "inject/serp.js"), ("readability", "lib/Readability.js"),
-                         ("extract", "inject/extract.js")):
+        for key, rel in (("serp", "serp.js"), ("readability", "Readability.js"),
+                         ("extract", "extract.js")):
             p = d / rel
             if p.exists():
                 self._js[key] = p.read_text(encoding="utf-8")
