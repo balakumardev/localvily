@@ -83,7 +83,13 @@ async def _lifespan(app):
     async def _loop():
         while True:
             await asyncio.sleep(30)
-            await _sweep_expired_actions()
+            try:
+                await _sweep_expired_actions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A sweep failure must not kill the loop for the app's lifetime.
+                pass
     task = asyncio.create_task(_loop())
     try:
         yield
