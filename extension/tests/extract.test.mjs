@@ -19,8 +19,11 @@ test("extracts clean article text >= 1000 chars", () => {
 
 test("extracted text excludes obvious nav chrome", () => {
   const out = extractContent(docFromFixture("article.html"), Readability);
-  // Wikipedia's left-nav contains 'Main page'/'Random article'; body prose should dominate.
+  // Wikipedia's left-nav contains 'Random article'/'What links here'; the extracted
+  // main content should contain the article prose but NOT those navigation labels.
   assert.match(out.text, /hash/i, "article body present");
+  assert.ok(!/Random article/.test(out.text), "left-nav 'Random article' stripped");
+  assert.ok(!/What links here/.test(out.text), "tools-nav 'What links here' stripped");
 });
 
 test("falls back to innerText when Readability yields nothing", () => {
