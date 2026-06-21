@@ -1,0 +1,8 @@
+body { font: 13px system-ui; width: 260px; padding: 12px; }
+h3 { margin: 0 0 8px; }
+.status { padding: 6px; border-radius: 4px; margin-bottom: 8px; }
+.status.ok { background: #e6f4ea; color: #137333; }
+.status.down { background: #fce8e6; color: #c5221f; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 0 0 8px; font-size: 12px; }
+dt { color: #666; }
+button { padding: 6px 12px; }
