@@ -45,3 +45,7 @@ async def test_fetch_login_signal_becomes_action_required(client):
     assert body["action"] == "login"
     assert body["url"] == "https://paywalled.example/article"
     assert body["resume_token"] in appmod.actions
+    action = appmod.actions[body["resume_token"]]
+    assert action.tab_id == 99
+    assert action.kind == "fetch"
+    assert action.action == "login"
