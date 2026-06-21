@@ -38,7 +38,6 @@ class CloakDriver:
         self._ctx = None
         self.available = False
         self._error = None
-        self._search_page = None
         self._sem = asyncio.Semaphore(FETCH_CAP)
         self._js = {}
         d = _shared_js_dir()
@@ -87,30 +86,53 @@ class CloakDriver:
             pass
         self._ctx = None
         self._pw = None
-        self._search_page = None
 
     async def close(self):
         await self._cleanup()
         self.available = False
 
     async def _eval_serp(self, page, k: int) -> dict:
-        await page.add_script_tag(content=self._js["serp"])
+        # Inject via evaluate(eval(src)) rather than add_script_tag: many sites
+        # (Bing, Wikipedia) set a Content-Security-Policy that silently blocks
+        # injected inline <script> tags, leaving globalThis.__serp undefined.
+        # Running the source inside page.evaluate is not subject to that CSP.
+        #
+        # SAFETY: `src` is our OWN trusted, first-party code — the generated
+        # extension/inject/serp.js bundle read from disk at startup (see __init__).
+        # It is never user input or remote content, so eval() of it carries no
+        # injection risk; it is the deliberate mechanism for CSP-exempt injection.
         return await page.evaluate(
-            "(k) => globalThis.__serp.detectBlock(document) ? {blocked:true}"
-            " : {results: globalThis.__serp.parse(document, k)}",
-            k,
+            "({src, k}) => {"
+            "  eval(src);"
+            "  return globalThis.__serp.detectBlock(document)"
+            "    ? {blocked: true}"
+            "    : {results: globalThis.__serp.parse(document, k)};"
+            "}",
+            {"src": self._js["serp"], "k": k},
         )
 
     async def _eval_extract(self, page) -> dict:
-        await page.add_script_tag(content=self._js["readability"])
-        await page.add_script_tag(content=self._js["extract"])
         return await page.evaluate(
-            "() => ({login: globalThis.__detectLogin(document), content: globalThis.__extract(document)})"
+            "({readability, extract}) => {"
+            "  eval(readability);"
+            "  eval(extract);"
+            "  return {login: globalThis.__detectLogin(document), content: globalThis.__extract(document)};"
+            "}",
+            {"readability": self._js["readability"], "extract": self._js["extract"]},
         )
 
     def _unavailable(self) -> dict:
         return {"status": "error", "driver": "cloak",
                 "error": f"cloak browser unavailable: {self._error or 'not started'}"}
+
+    @staticmethod
+    async def _safe_close(page):
+        if page is None:
+            return
+        try:
+            await page.close()
+        except Exception:
+            pass
 
     async def search(self, query: str, k: int = 10, engine: str = "bing") -> dict:
         if not self.available:
@@ -118,6 +140,7 @@ class CloakDriver:
         if not self.available:
             return self._unavailable()
         base = {"query": query, "engine": engine, "driver": "cloak"}
+        page = None
         try:
             page = await self._ctx.new_page()
             await page.goto(_serp_url(query, k), timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
@@ -125,12 +148,13 @@ class CloakDriver:
             res = await self._eval_serp(page, k)
             if res.get("blocked"):
                 await page.bring_to_front()
-                return {"status": "action_required", **base, "action": "solve_captcha",
-                        "_page": page}  # _page handed to the relay's action registry
+                # _page handed to the relay's action registry — intentionally NOT closed.
+                return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
             await page.close()
             results = res.get("results", [])
             return {"status": "ok", **base, "count": len(results), "results": results}
         except Exception as exc:
+            await self._safe_close(page)  # don't leak a visible tab on failure
             return {"status": "error", **base, "error": f"{type(exc).__name__}: {exc}"}
 
     async def fetch(self, url: str, include_html: bool = False) -> dict:
@@ -140,6 +164,7 @@ class CloakDriver:
             return self._unavailable()
         base = {"url": url, "driver": "cloak"}
         async with self._sem:
+            page = None
             try:
                 page = await self._ctx.new_page()
                 await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
@@ -158,31 +183,41 @@ class CloakDriver:
                 return {"status": "ok", **base, **{k: content[k] for k in
                         ("title", "text", "excerpt", "length", "html") if k in content}}
             except Exception as exc:
+                await self._safe_close(page)  # don't leak a visible tab on failure
                 return {"status": "error", **base, "error": f"{type(exc).__name__}: {exc}"}
 
     async def recheck(self, page, kind: str, payload: dict) -> dict:
         """Re-evaluate a held page after the human acted (resume path)."""
-        if kind == "search":
-            base = {"query": payload.get("query"), "engine": payload.get("engine"), "driver": "cloak"}
-            res = await self._eval_serp(page, payload.get("k", 10))
-            if res.get("blocked"):
+        try:
+            if kind == "search":
+                base = {"query": payload.get("query"), "engine": payload.get("engine"), "driver": "cloak"}
+                res = await self._eval_serp(page, payload.get("k", 10))
+                if res.get("blocked"):
+                    await page.bring_to_front()
+                    return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
+                await page.close()
+                results = res.get("results", [])
+                return {"status": "ok", **base, "count": len(results), "results": results}
+            base = {"url": payload.get("url"), "driver": "cloak"}
+            res = await self._eval_extract(page)
+            if res.get("login"):
                 await page.bring_to_front()
-                return {"status": "action_required", **base, "action": "solve_captcha", "_page": page}
+                return {"status": "action_required", **base, "action": "login", "_page": page}
+            content = res.get("content") or {}
+            if not content.get("text"):
+                await page.close()
+                return {"status": "error", **base, "error": "no extractable content"}
             await page.close()
-            results = res.get("results", [])
-            return {"status": "ok", **base, "count": len(results), "results": results}
-        base = {"url": payload.get("url"), "driver": "cloak"}
-        res = await self._eval_extract(page)
-        if res.get("login"):
-            await page.bring_to_front()
-            return {"status": "action_required", **base, "action": "login", "_page": page}
-        content = res.get("content") or {}
-        if not content.get("text"):
-            await page.close()
-            return {"status": "error", **base, "error": "no extractable content"}
-        await page.close()
-        return {"status": "ok", **base, **{k: content[k] for k in
-                ("title", "text", "excerpt", "length") if k in content}}
+            return {"status": "ok", **base, **{k: content[k] for k in
+                    ("title", "text", "excerpt", "length") if k in content}}
+        except Exception as exc:
+            await self._safe_close(page)
+            driver_base = {"driver": "cloak"}
+            if kind == "search":
+                driver_base["query"] = payload.get("query")
+            else:
+                driver_base["url"] = payload.get("url")
+            return {"status": "error", **driver_base, "error": f"{type(exc).__name__}: {exc}"}
 
 
 _driver: CloakDriver | None = None
