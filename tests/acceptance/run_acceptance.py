@@ -75,6 +75,13 @@ async def main() -> int:
                 f"C3: burst had search_errors={search_errors} search_empties={search_empties} "
                 f"fetch_errors={fetch_errors} fetch_empties={fetch_empties} (must all be 0)")
 
+        import os
+        if os.environ.get("BROWSER_RELAY_ACCEPT_CLOAK") == "1":
+            cf = (await c.get("/fetch", params={"url": "https://en.wikipedia.org/wiki/Consistent_hashing", "driver": "cloak"})).json()
+            print(f"C6 cloak fetch length={cf.get('length')} status={cf.get('status')}")
+            if cf.get("status") != "ok" or cf.get("length", 0) < 1000:
+                failures.append(f"C6 cloak fetch: expected >=1000 chars ok, got {cf}")
+
     if failures:
         for f in failures:
             print("FAIL", f)

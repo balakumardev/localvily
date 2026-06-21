@@ -114,6 +114,10 @@ async def _lifespan(app):
         yield
     finally:
         task.cancel()
+        try:
+            await get_cloak_driver().close()
+        except Exception:
+            pass
 
 
 app = FastAPI(lifespan=_lifespan)
