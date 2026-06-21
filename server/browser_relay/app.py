@@ -34,15 +34,16 @@ last_search_dispatch: float = 0.0
 
 
 class Job:
-    __slots__ = ("job_id", "kind", "payload", "event", "result", "dispatched")
+    __slots__ = ("job_id", "kind", "payload", "event", "result", "dispatched", "driver")
 
-    def __init__(self, kind: str, payload: dict):
+    def __init__(self, kind: str, payload: dict, driver: str = "relay"):
         self.job_id = uuid.uuid4().hex[:12]
         self.kind = kind  # "search" | "fetch"
         self.payload = payload
         self.event = asyncio.Event()
         self.result: dict | None = None
         self.dispatched = False
+        self.driver = driver
 
 
 jobs: dict[str, Job] = {}
@@ -52,9 +53,9 @@ last_poll_time: float = 0.0
 
 
 class Action:
-    __slots__ = ("resume_token", "kind", "payload", "tab_id", "action", "created_at", "resolved")
+    __slots__ = ("resume_token", "kind", "payload", "tab_id", "action", "created_at", "resolved", "driver")
 
-    def __init__(self, kind: str, payload: dict, tab_id, action: str):
+    def __init__(self, kind: str, payload: dict, tab_id, action: str, driver: str = "relay"):
         self.resume_token = secrets.token_urlsafe(12)
         self.kind = kind            # "search" | "fetch"
         self.payload = payload      # original job payload (query/engine/k or url)
@@ -62,6 +63,7 @@ class Action:
         self.action = action        # "solve_captcha" | "login"
         self.created_at = time.monotonic()
         self.resolved = False
+        self.driver = driver
 
 
 actions: dict[str, Action] = {}
@@ -110,8 +112,8 @@ def _extension_connected() -> bool:
     return (time.monotonic() - last_poll_time) <= EXTENSION_RECENT_POLL_THRESHOLD
 
 
-def _register_action(job: "Job", action: str, tab_id) -> Action:
-    record = Action(job.kind, dict(job.payload), tab_id, action)
+def _register_action(job: "Job", action: str, tab_id, driver: str = "relay") -> Action:
+    record = Action(job.kind, dict(job.payload), tab_id, action, driver=driver)
     actions[record.resume_token] = record
     return record
 
@@ -119,7 +121,7 @@ def _register_action(job: "Job", action: str, tab_id) -> Action:
 def _action_required_payload(record: Action) -> dict:
     base = {
         "status": "action_required",
-        "driver": "relay",
+        "driver": record.driver,
         "action": record.action,
         "message": _ACTION_MESSAGES.get(record.action, "Action required in the browser window."),
         "resume_token": record.resume_token,
@@ -139,7 +141,7 @@ def _shape_search(job: Job) -> dict:
     base = {
         "query": job.payload["query"],
         "engine": job.payload["engine"],
-        "driver": "relay",
+        "driver": job.driver,
     }
     if "error" in result:
         return {"status": "error", **base, "error": result["error"]}
@@ -151,7 +153,7 @@ def _shape_fetch(job: Job) -> dict:
     result = job.result or {"error": "no result"}
     if result.get("status") == "action_required":
         return result
-    base = {"url": job.payload["url"], "driver": "relay"}
+    base = {"url": job.payload["url"], "driver": job.driver}
     if "error" in result:
         return {"status": "error", **base, "error": result["error"]}
     out = {"status": "ok", **base}
@@ -194,7 +196,7 @@ async def health():
         {
             "resume_token": a.resume_token,
             "action": a.action,
-            "driver": "relay",
+            "driver": a.driver,
             "since_seconds": round(now_m - a.created_at, 1),
             **({"query": a.payload.get("query")} if a.kind == "search" else {"url": a.payload.get("url")}),
         }
@@ -295,7 +297,7 @@ async def post_result(job_id: str, body: ResultBody):
         raise HTTPException(404, "job not found or expired")
     data = body.model_dump()
     if data.get("action_required"):
-        record = _register_action(job, data.get("action", "solve_captcha"), data.get("tab_id"))
+        record = _register_action(job, data.get("action", "solve_captcha"), data.get("tab_id"), driver=job.driver)
         job.result = _action_required_payload(record)
     else:
         job.result = data

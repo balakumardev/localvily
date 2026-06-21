@@ -169,3 +169,21 @@ async def test_repeated_still_blocked_resume_keeps_one_stable_token(client):
     assert token not in appmod.actions
     again = (await client.post(f"/resume/{token}")).json()
     assert again["status"] == "error"
+
+
+async def test_action_carries_driver_field_default_relay(client):
+    from browser_relay.app import Action
+    a = Action("search", {"query": "q", "engine": "bing"}, 1, "solve_captcha")
+    assert a.driver == "relay"
+    b = Action("fetch", {"url": "u"}, 2, "login", driver="cloak")
+    assert b.driver == "cloak"
+
+
+async def test_action_required_payload_reflects_action_driver(client):
+    # A cloak-registered action must surface driver:"cloak", not a hardcoded relay.
+    import browser_relay.app as appmod
+    from browser_relay.app import Action, _action_required_payload
+    rec = Action("fetch", {"url": "https://x"}, 5, "login", driver="cloak")
+    payload = _action_required_payload(rec)
+    assert payload["driver"] == "cloak"
+    assert payload["status"] == "action_required"
