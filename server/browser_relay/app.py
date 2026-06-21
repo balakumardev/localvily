@@ -2,6 +2,7 @@ import asyncio
 import time
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -65,7 +66,32 @@ class Action:
 
 actions: dict[str, Action] = {}
 
-app = FastAPI()
+action_close_queue: deque = deque()  # tab ids to close (expired/resolved actions)
+
+
+async def _sweep_expired_actions():
+    now = time.monotonic()
+    expired = [t for t, a in actions.items() if not a.resolved and (now - a.created_at) >= ACTION_TTL]
+    for token in expired:
+        record = actions.pop(token, None)
+        if record and record.tab_id is not None:
+            action_close_queue.append(record.tab_id)
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    async def _loop():
+        while True:
+            await asyncio.sleep(30)
+            await _sweep_expired_actions()
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 class ResultBody(BaseModel):
@@ -200,18 +226,19 @@ async def pending():
     now = time.monotonic()
     batch = []
 
-    # Searches: near-serial with spacing.
-    while (
-        search_queue
-        and search_in_flight < SEARCH_CONCURRENCY
-        and (now - last_search_dispatch) * 1000 >= SEARCH_MIN_SPACING_MS
-    ):
+    # Searches: near-serial with spacing. Recheck jobs reuse a held tab (they do
+    # not open a new search tab against the engine), so they bypass the spacing throttle.
+    while search_queue and search_in_flight < SEARCH_CONCURRENCY:
         job = search_queue[0]
         if job.dispatched:
             break
+        is_recheck = "recheck_tab_id" in job.payload
+        if not is_recheck and (now - last_search_dispatch) * 1000 < SEARCH_MIN_SPACING_MS:
+            break
         job.dispatched = True
         search_in_flight += 1
-        last_search_dispatch = now
+        if not is_recheck:
+            last_search_dispatch = now
         batch.append({"job_id": job.job_id, "kind": job.kind, **job.payload})
 
     # Fetches: parallel up to FETCH_CAP.
@@ -224,7 +251,11 @@ async def pending():
         fetch_in_flight += 1
         batch.append({"job_id": job.job_id, "kind": job.kind, **job.payload})
 
-    return {"jobs": batch, "close_tabs": []}
+    close_tabs = []
+    while action_close_queue:
+        close_tabs.append(action_close_queue.popleft())
+
+    return {"jobs": batch, "close_tabs": close_tabs}
 
 
 def _release(job: Job):
@@ -252,3 +283,40 @@ async def post_result(job_id: str, body: ResultBody):
     _release(job)
     job.event.set()
     return {"status": "ok"}
+
+
+@app.post("/resume/{token}")
+async def resume(token: str):
+    record = actions.get(token)
+    if not record:
+        return {"status": "error", "error": "action expired or unknown"}
+    if record.resolved:
+        return {"status": "error", "error": "action already resolved or unknown"}
+    if (time.monotonic() - record.created_at) >= ACTION_TTL:
+        actions.pop(token, None)
+        if record.tab_id is not None:
+            action_close_queue.append(record.tab_id)
+        return {"status": "error", "error": "action expired"}
+
+    # Enqueue a recheck job that re-uses the held tab.
+    payload = dict(record.payload)
+    payload["recheck_tab_id"] = record.tab_id
+    job = Job(record.kind, payload)
+    queue = search_queue if record.kind == "search" else fetch_queue
+    timeout = QUERY_TIMEOUT if record.kind == "search" else FETCH_TIMEOUT
+    await _await_job(job, queue, timeout)
+
+    result = _shape_search(job) if record.kind == "search" else _shape_fetch(job)
+    if result.get("status") == "action_required":
+        # Still blocked — keep the SAME token alive for another resume.
+        # post_result registered a new action; collapse it back onto this token.
+        new_token = result.get("resume_token")
+        if new_token and new_token in actions:
+            actions[token] = actions.pop(new_token)
+            actions[token].resume_token = token
+            actions[token].created_at = time.monotonic()  # refresh TTL on activity
+            result["resume_token"] = token
+    else:
+        record.resolved = True
+        actions.pop(token, None)
+    return result
