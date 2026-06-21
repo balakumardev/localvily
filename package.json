@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:inject": "node extension/build-inject.mjs",
+    "pretest": "node extension/build-inject.mjs",
     "test": "node --test \"extension/tests/**/*.test.mjs\""
   },
   "devDependencies": {

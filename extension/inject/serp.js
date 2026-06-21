@@ -1,3 +1,7 @@
+// GENERATED FILE — DO NOT EDIT.
+// Built from the ES-module source by extension/build-inject.mjs (`npm run build:inject`).
+// Edit the source module instead, then regenerate.
+
 // Bing SERP parser. Pure functions — no chrome.* APIs — so it runs under jsdom in
 // tests and is injected into the live SERP tab by the service worker at runtime.
 //

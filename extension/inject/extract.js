@@ -1,3 +1,7 @@
+// GENERATED FILE — DO NOT EDIT.
+// Built from the ES-module source by extension/build-inject.mjs (`npm run build:inject`).
+// Edit the source module instead, then regenerate.
+
 // Pure content extraction: Readability on a document clone, with an innerText fallback.
 // `ReadabilityCtor` is passed in so this works both under jsdom (npm @mozilla/readability)
 // and in the extension (vendored global `Readability` injected before this module).
