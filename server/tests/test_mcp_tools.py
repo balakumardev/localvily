@@ -40,12 +40,29 @@ async def test_search_tool_passthrough(monkeypatch):
     assert body["count"] == 1
 
 
-async def test_cloak_driver_rejected(monkeypatch):
+async def test_cloak_driver_routes_through(monkeypatch):
+    # driver="cloak" now routes to the in-process cloak driver (Phase 4 Task 3).
+    # Monkeypatch the driver so the test stays headless (no real browser).
     _patch_client(monkeypatch)
+
+    class _FakeCloak:
+        async def search(self, query, k=10, engine="bing"):
+            return {"status": "ok", "query": query, "engine": engine, "driver": "cloak",
+                    "count": 1, "results": [{"title": "T", "url": "https://e", "snippet": "s"}]}
+
+    monkeypatch.setattr(appmod, "get_cloak_driver", lambda: _FakeCloak())
     out = await mcpserver.search("x", driver="cloak")
     body = json.loads(out)
+    assert body["status"] == "ok"
+    assert body["driver"] == "cloak"
+
+
+async def test_unknown_driver_rejected(monkeypatch):
+    _patch_client(monkeypatch)
+    out = await mcpserver.search("x", driver="bogus")
+    body = json.loads(out)
     assert body["status"] == "error"
-    assert "cloak" in body["error"]
+    assert "unknown driver" in body["error"]
 
 
 async def test_request_never_raises_on_transport_error(monkeypatch):

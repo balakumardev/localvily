@@ -334,7 +334,7 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 async def search(query: str, k: int = 10, engine: str = "bing", driver: str = "relay") -> str:
     """Web search via the user's browser. Returns {status, results:[{title,url,snippet}]}.
 
-    driver: "relay" (default, the user's logged-in Chrome) or "cloak" (stealth headless; not in this build).
+    driver: "relay" (default, the user's logged-in Chrome) or "cloak" (embedded stealth browser).
     """
     result = await _request("GET", "/search", params={"q": query, "k": k, "engine": engine, "driver": driver})
     return json.dumps(result, indent=2)

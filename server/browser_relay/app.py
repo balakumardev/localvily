@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from browser_relay import __version__
+from browser_relay.drivers.cloak import get_cloak_driver
 
 EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # seconds
 QUERY_TIMEOUT = 110.0
@@ -69,6 +70,22 @@ class Action:
 actions: dict[str, Action] = {}
 
 action_close_queue: deque = deque()  # tab ids to close (expired/resolved actions)
+
+cloak_pages: dict = {}          # int handle -> live cloak page object
+_next_cloak_page_id: int = 1
+
+
+def _register_cloak_action(driver_result: dict, kind: str, payload: dict) -> dict:
+    """Turn a cloak driver action_required result (carrying _page) into a registered
+    action + a JSON-safe payload. Stores the page under an int handle."""
+    global _next_cloak_page_id
+    page = driver_result.pop("_page", None)
+    handle = _next_cloak_page_id
+    _next_cloak_page_id += 1
+    cloak_pages[handle] = page
+    job = Job(kind, dict(payload), driver="cloak")
+    record = _register_action(job, driver_result.get("action", "solve_captcha"), handle, driver="cloak")
+    return _action_required_payload(record)
 
 
 async def _sweep_expired_actions():
@@ -203,10 +220,12 @@ async def health():
         for a in actions.values()
         if not a.resolved
     ]
+    extension_status = "connected" if connected else ("stale" if last_poll_time else "never_seen")
+    cloak_status = get_cloak_driver().status()
     return {
         "status": "ok",
         "extension_connected": connected,
-        "extension_status": "connected" if connected else ("stale" if last_poll_time else "never_seen"),
+        "extension_status": extension_status,
         "last_poll_age_seconds": poll_age,
         "search_queued": len(search_queue),
         "fetch_queued": len(fetch_queue),
@@ -215,15 +234,28 @@ async def health():
         "engine": DEFAULT_ENGINE,
         "pending_actions": pending_actions,
         "version": __version__,
+        "drivers": {
+            "relay": {
+                "extension_connected": connected,
+                "extension_status": extension_status,
+                "last_poll_age_seconds": poll_age,
+            },
+            "cloak": cloak_status,
+        },
     }
 
 
 @app.get("/search")
 async def search(q: str, k: int = 10, engine: str = "bing", driver: str = "relay"):
-    if driver != "relay":
-        return {"status": "error", "error": "cloak driver not available in this build"}
     if not q.strip():
         raise HTTPException(400, "query is required")
+    if driver == "cloak":
+        result = await get_cloak_driver().search(q.strip(), k=k, engine=engine)
+        if result.get("status") == "action_required":
+            return _register_cloak_action(result, "search", {"query": q.strip(), "k": k, "engine": engine})
+        return result
+    if driver != "relay":
+        return {"status": "error", "error": f"unknown driver: {driver}"}
     job = Job("search", {"query": q.strip(), "k": k, "engine": engine})
     await _await_job(job, search_queue, QUERY_TIMEOUT)
     return _shape_search(job)
@@ -231,10 +263,15 @@ async def search(q: str, k: int = 10, engine: str = "bing", driver: str = "relay
 
 @app.get("/fetch")
 async def fetch(url: str, include_html: bool = False, driver: str = "relay"):
-    if driver != "relay":
-        return {"status": "error", "error": "cloak driver not available in this build"}
     if not url.strip():
         raise HTTPException(400, "url is required")
+    if driver == "cloak":
+        result = await get_cloak_driver().fetch(url.strip(), include_html=include_html)
+        if result.get("status") == "action_required":
+            return _register_cloak_action(result, "fetch", {"url": url.strip(), "include_html": include_html})
+        return result
+    if driver != "relay":
+        return {"status": "error", "error": f"unknown driver: {driver}"}
     job = Job("fetch", {"url": url.strip(), "include_html": include_html})
     await _await_job(job, fetch_queue, FETCH_TIMEOUT)
     return _shape_fetch(job)
