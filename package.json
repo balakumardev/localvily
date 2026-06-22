@@ -6,7 +6,7 @@
   "scripts": {
     "build:inject": "node extension/build-inject.mjs",
     "pretest": "node extension/build-inject.mjs",
-    "test": "node --test \"extension/tests/**/*.test.mjs\""
+    "test": "node --test"
   },
   "devDependencies": {
     "@mozilla/readability": "^0.6.0",
