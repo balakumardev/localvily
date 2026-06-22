@@ -1,0 +1,15 @@
+{
+  "name": "browser-relay-mcp-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:inject": "node extension/build-inject.mjs",
+    "pretest": "node extension/build-inject.mjs",
+    "test": "node --test \"extension/tests/**/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^24.0.0"
+  }
+}
