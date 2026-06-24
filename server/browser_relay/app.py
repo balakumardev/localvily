@@ -17,10 +17,30 @@ FETCH_TIMEOUT = 60.0
 import os
 import secrets
 
+# Parallel fetch tabs. Fetches hit arbitrary article domains (not the search
+# engine), so unlike searches they carry no CAPTCHA risk from concurrency — raise
+# BROWSER_RELAY_FETCH_CAP for heavier fetch fan-out (e.g. multi-threaded STORM).
 FETCH_CAP = int(os.environ.get("BROWSER_RELAY_FETCH_CAP", "5"))
-SEARCH_CONCURRENCY = int(os.environ.get("BROWSER_RELAY_SEARCH_CONCURRENCY", "1"))
-SEARCH_MIN_SPACING_MS = int(os.environ.get("BROWSER_RELAY_SEARCH_MIN_SPACING_MS", "500"))
+# Concurrent SERP tabs. STORM fans out dozens of searches at once; serializing
+# them (the old default of 1) made each call queue behind the others and balloon
+# to 20-75s observed latency. Running a few SERP tabs in parallel collapses that
+# queue. Kept modest — and dispatched with a small stagger (below) — so we don't
+# trip Bing's bot detection. Tune via env if a given session starts seeing CAPTCHAs.
+SEARCH_CONCURRENCY = int(os.environ.get("BROWSER_RELAY_SEARCH_CONCURRENCY", "4"))
+# Minimum gap between *new* SERP dispatches. Staggers the ramp-up to SEARCH_CONCURRENCY
+# instead of opening N tabs in the same instant (gentler on Bing), while still
+# reaching full parallelism within a few hundred ms.
+SEARCH_MIN_SPACING_MS = int(os.environ.get("BROWSER_RELAY_SEARCH_MIN_SPACING_MS", "200"))
 ACTION_TTL = float(os.environ.get("BROWSER_RELAY_ACTION_TTL", "300"))
+
+# Long-poll: the extension calls /pending?wait=N so the relay can hold the request
+# open until a job is dispatchable, instead of the extension blind-polling on a
+# fixed interval. Capped below the extension's own fetch timeout. Bare /pending
+# (no wait) keeps the original immediate-return behavior (tests rely on this).
+PENDING_LONGPOLL_MAX = float(os.environ.get("BROWSER_RELAY_PENDING_LONGPOLL_MAX", "27"))
+# How often the long-poll re-evaluates dispatchability when nothing woke it. Also
+# bounds how long a spacing-throttled search waits before its slot is reconsidered.
+PENDING_RECHECK_INTERVAL = 0.25
 
 _ACTION_MESSAGES = {
     "solve_captcha": "The search engine is showing a CAPTCHA. A browser window has been "
@@ -51,6 +71,21 @@ jobs: dict[str, Job] = {}
 search_queue: deque[Job] = deque()
 fetch_queue: deque[Job] = deque()
 last_poll_time: float = 0.0
+
+# Wakes any in-progress long-poll on /pending the moment work becomes
+# dispatchable (a job is enqueued, or a slot frees on result/timeout), so pickup
+# latency is ~0 instead of a poll interval. A modern asyncio.Event binds to the
+# running loop lazily, so module-level construction is fine.
+_job_event: asyncio.Event = asyncio.Event()
+
+
+def _notify_pending() -> None:
+    """Signal long-pollers that the dispatch state changed."""
+    try:
+        _job_event.set()
+    except RuntimeError:
+        # No running loop (e.g. imported in a sync context) — long-poll isn't active.
+        pass
 
 
 class Action:
@@ -207,6 +242,7 @@ def _shape_fetch(job: Job) -> dict:
 async def _await_job(job: Job, queue: deque, timeout: float):
     queue.append(job)
     jobs[job.job_id] = job
+    _notify_pending()  # new work — wake any waiting long-poll
     try:
         await asyncio.wait_for(job.event.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -218,6 +254,7 @@ async def _await_job(job: Job, queue: deque, timeout: float):
         except ValueError:
             pass
         _release(job)
+        _notify_pending()  # freed a slot (and/or dequeued) — let queued work dispatch
 
 
 @app.get("/version")
@@ -301,15 +338,21 @@ async def fetch(url: str, include_html: bool = False, driver: str = "relay"):
     return _shape_fetch(job)
 
 
-@app.get("/pending")
-async def pending():
-    global last_poll_time, search_in_flight, fetch_in_flight, last_search_dispatch
-    last_poll_time = time.monotonic()
+def _build_pending_batch() -> tuple[list, list]:
+    """Pull the next dispatchable jobs plus any tabs queued for closing.
+
+    Searches dispatch up to SEARCH_CONCURRENCY with min-spacing between new ones;
+    fetches dispatch up to FETCH_CAP in parallel. Mutates the in-flight counters
+    and per-job dispatch flags. Synchronous and non-blocking — the long-poll loop
+    in /pending calls this repeatedly.
+    """
+    global search_in_flight, fetch_in_flight, last_search_dispatch
     now = time.monotonic()
     batch = []
 
-    # Searches: near-serial with spacing. Recheck jobs reuse a held tab (they do
-    # not open a new search tab against the engine), so they bypass the spacing throttle.
+    # Searches: capped at SEARCH_CONCURRENCY with spacing between new dispatches.
+    # Recheck jobs reuse a held tab (they do not open a new search tab against the
+    # engine), so they bypass the spacing throttle.
     while search_queue and search_in_flight < SEARCH_CONCURRENCY:
         job = search_queue[0]
         if job.dispatched:
@@ -337,7 +380,39 @@ async def pending():
     while action_close_queue:
         close_tabs.append(action_close_queue.popleft())
 
-    return {"jobs": batch, "close_tabs": close_tabs}
+    return batch, close_tabs
+
+
+@app.get("/pending")
+async def pending(wait: float = 0.0):
+    """Hand the extension its next batch of jobs.
+
+    Bare ``/pending`` returns immediately (the original behavior — tests rely on
+    it). ``/pending?wait=N`` long-polls: the relay holds the request open until a
+    job is dispatchable or up to N seconds (capped at PENDING_LONGPOLL_MAX),
+    waking the instant work arrives. This removes per-poll pickup latency and
+    keeps the MV3 service worker warm via a continuously-outstanding request.
+    """
+    global last_poll_time
+    last_poll_time = time.monotonic()
+
+    wait = min(max(wait, 0.0), PENDING_LONGPOLL_MAX)
+    deadline = time.monotonic() + wait
+    while True:
+        batch, close_tabs = _build_pending_batch()
+        if batch or close_tabs or wait <= 0:
+            return {"jobs": batch, "close_tabs": close_tabs}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"jobs": [], "close_tabs": []}
+        # Wait to be woken by new work / a freed slot, but re-check periodically
+        # so a spacing-throttled search still dispatches when its window opens.
+        _job_event.clear()
+        try:
+            await asyncio.wait_for(_job_event.wait(), timeout=min(remaining, PENDING_RECHECK_INTERVAL))
+        except asyncio.TimeoutError:
+            pass
+        last_poll_time = time.monotonic()
 
 
 def _release(job: Job):
@@ -363,6 +438,7 @@ async def post_result(job_id: str, body: ResultBody):
     else:
         job.result = data
     _release(job)
+    _notify_pending()  # freed a slot — let a queued job dispatch on the next poll
     job.event.set()
     return {"status": "ok"}
 
